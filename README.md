@@ -34,6 +34,15 @@
 | **🆕 智能重试** | 图片生成失败自动换号，CDN 下载降级，详细中文错误提示 |
 | **🆕 批量管理** | 跨页全选、批量禁用/恢复、一键删除失效账号 |
 
+### 本仓库附加改动
+
+相较于 `jiujiu532/grok2api`，本仓库额外提供：
+
+- **图片失败可读化**：上游 HTTP 状态会转换成中文原因；本地媒体缓存下载失败时，非 Base64 响应会降级返回原始 CDN URL。
+- **并发图片容错**：同一请求中的单张失败不会立即中断其他图片；全部失败时返回首个可读错误。
+- **批量账号操作**：按筛选条件跨页全选，显示已选数量，并可批量禁用、恢复或删除。
+- **防封版自动配置**：防封版从当前目录构建镜像，并在首次启动时写入 Privoxy 与 FlareSolverr 配置；数据和日志使用 Docker 命名卷持久化。
+
 ---
 
 ## 架构说明
@@ -43,7 +52,8 @@
 | | 标准版 | 防封版 |
 | :--- | :--- | :--- |
 | **适用场景** | IP 干净，能直连 grok.com | IP 被封锁（中国大陆等），需代理 |
-| **部署方式** | Docker 单容器 / Docker Compose | Docker Compose (5 容器) |
+| **部署方式** | Docker 单容器 / Docker Compose | Docker Compose（4 个服务） |
+| **代码来源** | 当前文件直接拉取 `jiujiu532` 的预构建镜像 | 从当前仓库本地构建镜像 |
 | **出口网络** | 直连 | WARP WireGuard 隧道 → Cloudflare 全球网络 |
 | **CF 反爬** | 可能被 403 拦截 | FlareSolverr 自动解 JS 挑战 |
 | **成功率** | ~30%（被墙环境） | ~95%+ |
@@ -59,7 +69,9 @@ grok2api 容器
   → grok.com / console.x.ai / assets.grok.com
 ```
 
-> **重要**：防封版仅支持 Docker 部署，因为 WARP 容器需要 `NET_ADMIN` 内核能力，只能在 Linux Docker 引擎上运行。**如果你的机器是 Windows 且没有虚拟化支持（如在虚拟机内），防封版将无法工作。** 这种情况请使用标准版 + 手动配置代理。
+> **重要**：防封版仅支持 Docker 部署，因为 WARP 容器需要 `NET_ADMIN` 内核能力和 Linux 容器引擎。Windows/macOS 请使用 Docker Desktop 的 Linux 容器模式，并确保虚拟化/WSL2 可用；部分嵌套虚拟机环境可能不支持这些能力。
+
+> **版本提醒**：当前 `docker-compose.yml` 直接使用 `ghcr.io/jiujiu532/grok2api:latest`，不会构建本仓库工作目录；上面的本仓库附加改动由 `docker-compose.warp.yml` 的本地构建提供。若标准版也要使用这些改动，应先将标准版编排改为本地构建。
 
 ---
 
@@ -68,7 +80,7 @@ grok2api 容器
 ### 前提条件
 
 - **标准版**: Docker 或 Python 3.13+ + [uv](https://docs.astral.sh/uv/)
-- **防封版**: Docker + Docker Compose，宿主机需为 Linux 或安装了 Docker Desktop 的 Windows/Mac
+- **防封版**: Docker + Docker Compose；Linux 可直接运行，Windows/macOS 请安装 Docker Desktop
 
 ### 标准版部署
 
@@ -104,7 +116,7 @@ docker compose -f docker-compose.warp.yml up -d
 
 启动后访问 `http://localhost:8000/admin/login`。
 
-五个容器会自动协同工作：
+四个服务会自动协同工作：
 | 容器 | 作用 |
 | :--- | :--- |
 | `warp-proxy` | Cloudflare WARP WireGuard 隧道 |
@@ -112,19 +124,7 @@ docker compose -f docker-compose.warp.yml up -d
 | `flaresolverr` | 自动解 Cloudflare JS 挑战 |
 | `grok2api` | 主应用（API 网关 + 管理后台） |
 
-**远程 Docker 部署**（Docker 引擎在另一台机器上）:
-
-```powershell
-# 在开发机上设置远程 Docker 地址
-$env:DOCKER_HOST = 'tcp://<宿主机IP>:2375'
-docker compose -f docker-compose.warp.yml build
-docker compose -f docker-compose.warp.yml up -d
-
-# 访问地址（端口在宿主机上）
-# http://<宿主机IP>:8000/admin/login
-```
-
-> 项目包含启动脚本 `Start-Grok2API.ps1`（开发机用）和 `启动-Grok2API-宿主机.cmd`（宿主机用），双击即可自动启动。
+**Windows 防封版启动器：** 双击 `启动-Grok2API-防封版.cmd`。它会先检查 `http://localhost:8000/health`；服务已就绪时直接打开管理后台，否则使用 `docker compose -f docker-compose.warp.yml up -d` 创建或启动完整防封栈，并等待服务就绪。
 
 ### 首次配置
 
@@ -354,11 +354,8 @@ docker compose -f docker-compose.warp.yml build grok2api
 docker compose -f docker-compose.warp.yml up -d grok2api
 ```
 
-### 虚拟机内部署 Docker 失败？
-防封版的 WARP 容器需要 `NET_ADMIN` 内核能力，在虚拟机内嵌套 Docker 无法使用。解决方案：
-- 将防封版部署在物理机/云服务器上
-- 虚拟机仅保留源代码用于开发，通过 Docker CLI 远程管理宿主机容器
-- 或在虚拟机部署标准版 + 手动配置代理
+### 防封版在虚拟化环境中无法启动？
+确认 Docker 正在运行 Linux 容器，并检查该环境是否允许 `NET_ADMIN` 能力。若嵌套虚拟化或安全策略阻止 WARP 容器，请使用标准版并配置自己的代理。
 
 ---
 
@@ -383,9 +380,7 @@ grok2api/
 │   ├── entrypoint.sh        # 容器入口 (自动写代理配置)
 │   ├── init_storage.sh      # 存储初始化
 │   └── init_proxy_config.py # 防封版代理配置写入
-├── Start-Grok2API.ps1       # 开发机启动脚本 (自动发现宿主机)
-├── 启动-Grok2API.cmd        # 启动器辅助
-├── 启动-Grok2API-宿主机.cmd  # 宿主机启动脚本
+├── 启动-Grok2API-防封版.cmd  # Windows 防封版启动器
 ├── docker-compose.yml       # 标准版
 ├── docker-compose.warp.yml  # 防封版 (本地构建)
 ├── Dockerfile               # 镜像构建 (Alpine + Rust + curl_cffi)
