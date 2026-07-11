@@ -236,6 +236,8 @@ async def save_tokens(
             total_upserted += len(upserts)
 
     logger.info("admin tokens saved across pools: saved_count={}", total_upserted)
+    immediate_limit = max(0, int(get_config("account.refresh.import_immediate_limit", 500)))
+    maintenance_deferred = len(set(all_tokens)) > immediate_limit
     if all_tokens:
         _fire_and_forget(_refresh_then_auto_nsfw(
             refresh_svc,
@@ -243,7 +245,11 @@ async def save_tokens(
             all_tokens,
             auto_nsfw_enabled=auto_nsfw,
         ))
-    return _json({"status": "success", "count": total_upserted})
+    return _json({
+        "status": "success",
+        "count": total_upserted,
+        "maintenance_deferred": maintenance_deferred,
+    })
 
 
 @router.post("/tokens/add")
@@ -538,6 +544,14 @@ async def _refresh_then_auto_nsfw(
     auto_nsfw_enabled: bool,
 ) -> None:
     unique_tokens = list(dict.fromkeys(tokens))
+    immediate_limit = max(0, int(get_config("account.refresh.import_immediate_limit", 500)))
+    if len(unique_tokens) > immediate_limit:
+        logger.info(
+            "admin import maintenance deferred: token_count={} immediate_limit={}",
+            len(unique_tokens),
+            immediate_limit,
+        )
+        return
     if await _refresh_imported(svc, unique_tokens):
         _schedule_auto_nsfw(repo, unique_tokens, enabled=auto_nsfw_enabled)
 

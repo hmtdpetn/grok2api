@@ -217,27 +217,22 @@ def _record_to_patch(r) -> "AccountPatch":
 # ---------------------------------------------------------------------------
 
 async def _backfill_grok_4_3_quota(repo: "AccountRepository") -> None:
-    from app.control.account.commands import AccountPatch, ListAccountsQuery
+    from app.control.account.commands import AccountPatch
     from app.control.account.quota_defaults import default_quota_window
 
+    # Take one stable snapshot before writing.  Paginating by updated_at while
+    # patching changes that order, which can make a large startup migration
+    # repeatedly revisit the same rows.
+    snapshot = await repo.runtime_snapshot()
     patches: list[AccountPatch] = []
-    page = 1
-    while True:
-        result = await repo.list_accounts(
-            ListAccountsQuery(page=page, page_size=_BATCH, include_deleted=False)
-        )
-        for record in result.items:
-            if record.pool not in ("super", "heavy"):
-                continue
-            if record.quota_set().grok_4_3 is not None:
-                continue
-            window = default_quota_window(record.pool, 4)
-            if window is None:
-                continue
+    for record in snapshot.items:
+        if record.is_deleted() or record.pool not in ("super", "heavy"):
+            continue
+        if record.quota_set().grok_4_3 is not None:
+            continue
+        window = default_quota_window(record.pool, 4)
+        if window is not None:
             patches.append(AccountPatch(token=record.token, quota_grok_4_3=window.to_dict()))
-        if page >= result.total_pages:
-            break
-        page += 1
 
     if not patches:
         return
@@ -251,35 +246,26 @@ async def _backfill_grok_4_3_quota(repo: "AccountRepository") -> None:
 
 
 async def _normalize_basic_fast_only_quota(repo: "AccountRepository") -> None:
-    from app.control.account.commands import AccountPatch, ListAccountsQuery
+    from app.control.account.commands import AccountPatch
     from app.control.account.quota_defaults import normalize_quota_set
 
+    # See _backfill_grok_4_3_quota: updates must not invalidate pagination.
+    snapshot = await repo.runtime_snapshot()
     patches: list[AccountPatch] = []
-    page = 1
-    while True:
-        result = await repo.list_accounts(
-            ListAccountsQuery(
-                page=page,
-                page_size=_BATCH,
-                pool="basic",
-                include_deleted=False,
+    for record in snapshot.items:
+        if record.is_deleted() or record.pool != "basic":
+            continue
+        normalized = normalize_quota_set("basic", record.quota_set())
+        if normalized.to_dict() == record.quota_set().to_dict():
+            continue
+        patches.append(
+            AccountPatch(
+                token=record.token,
+                quota_auto=normalized.auto.to_dict(),
+                quota_fast=normalized.fast.to_dict(),
+                quota_expert=normalized.expert.to_dict(),
             )
         )
-        for record in result.items:
-            normalized = normalize_quota_set("basic", record.quota_set())
-            if normalized.to_dict() == record.quota_set().to_dict():
-                continue
-            patches.append(
-                AccountPatch(
-                    token=record.token,
-                    quota_auto=normalized.auto.to_dict(),
-                    quota_fast=normalized.fast.to_dict(),
-                    quota_expert=normalized.expert.to_dict(),
-                )
-            )
-        if page >= result.total_pages:
-            break
-        page += 1
 
     if not patches:
         return
@@ -294,25 +280,18 @@ async def _normalize_basic_fast_only_quota(repo: "AccountRepository") -> None:
 
 async def _backfill_console_quota(repo: "AccountRepository") -> None:
     """Backfill quota_console for all accounts that don't have it yet."""
-    from app.control.account.commands import AccountPatch, ListAccountsQuery
+    from app.control.account.commands import AccountPatch
     from app.control.account.quota_defaults import default_quota_window
 
+    # See _backfill_grok_4_3_quota: use a stable source while writing patches.
+    snapshot = await repo.runtime_snapshot()
     patches: list[AccountPatch] = []
-    page = 1
-    while True:
-        result = await repo.list_accounts(
-            ListAccountsQuery(page=page, page_size=_BATCH, include_deleted=False)
-        )
-        for record in result.items:
-            if record.quota_set().console is not None:
-                continue
-            window = default_quota_window(record.pool, 5)
-            if window is None:
-                continue
+    for record in snapshot.items:
+        if record.is_deleted() or record.quota_set().console is not None:
+            continue
+        window = default_quota_window(record.pool, 5)
+        if window is not None:
             patches.append(AccountPatch(token=record.token, quota_console=window.to_dict()))
-        if page >= result.total_pages:
-            break
-        page += 1
 
     if not patches:
         return

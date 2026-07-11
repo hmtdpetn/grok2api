@@ -1784,13 +1784,20 @@ async function doImport() {
     let total = 0;
     Object.values(parsed).forEach(arr => { if (Array.isArray(arr)) total += arr.length; });
     if (!total) return showToast(tr('account.jsonEmpty', null, 'JSON 文件中没有可导入的 Token'), 'error');
+    const submit = document.querySelector('#modal-import-file .dialog-btn-primary');
+    if (submit?.disabled) return;
     try {
+      if (submit) submit.disabled = true;
       showToast(tr('account.importing', { n: total }, `正在导入 ${total} 个账户…`), 'info');
-      await _api('POST', `/tokens?auto_nsfw=${autoNsfw}`, parsed);
+      const result = await _api('POST', `/tokens?auto_nsfw=${autoNsfw}`, parsed);
       closeModal('modal-import-file');
       showToast(tr('account.importJsonDone', { n: total }, `导入完成，共 ${total} 个`), 'success');
+      if (result.maintenance_deferred) {
+        showToast('账号已保存；大量账号的配额同步将由后台分时处理', 'info');
+      }
       load();
     } catch (e) { showToast(`${tr('account.importFailed', null, '导入失败')}: ${e.message}`, 'error'); }
+    finally { if (submit) submit.disabled = false; }
   } else {
     // TXT 格式: 每行一个 token
     const pool = document.getElementById('import-file-pool').value;
