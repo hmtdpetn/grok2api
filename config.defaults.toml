@@ -175,7 +175,14 @@ timeout = 60
 # ==================== 批量操作 ====================
 [batch]
 # 开启 NSFW 并发数（token 级，每个 token 需三步网络请求）
-nsfw_concurrency         = 50
+# NSFW 认证接口会按出口 IP 限速；保守并发配合分批与重试可避免整批 429。
+nsfw_concurrency         = 5
+# 每批 token 数量及批间等待时间。0 秒可关闭等待，但不建议对公网批量操作使用。
+nsfw_batch_size          = 25
+nsfw_pause_sec           = 1.0
+# 单个 token 收到上游 429 时的重试次数与指数退避起始秒数。
+nsfw_max_retries         = 3
+nsfw_retry_base_sec      = 2.0
 # 刷新 Usage 并发数（token 级）
 refresh_concurrency      = 50
 # 上传 Asset 并发数（全局，API 收到附件时触发，跨所有并发请求共享）

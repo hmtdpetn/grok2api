@@ -48,15 +48,40 @@ def _concurrency(override: int | None, config_key: str, fallback: int = 50) -> i
     return min(max(1, resolved), _MAX_BATCH_CONCURRENCY)
 
 
+def _config_int(config_key: str, fallback: int, *, minimum: int, maximum: int) -> int:
+    """Read one bounded integer setting without letting a bad config break a batch."""
+    try:
+        value = int(get_config(config_key, fallback))
+    except (TypeError, ValueError):
+        value = fallback
+    return min(max(minimum, value), maximum)
+
+
+def _config_float(config_key: str, fallback: float, *, minimum: float, maximum: float) -> float:
+    """Read one bounded float setting without letting a bad config break a batch."""
+    try:
+        value = float(get_config(config_key, fallback))
+    except (TypeError, ValueError):
+        value = fallback
+    return min(max(minimum, value), maximum)
+
+
 def _mask(token: str) -> str:
     return f"{token[:8]}...{token[-8:]}" if len(token) > 20 else token
 
 
-async def _list_all_tokens(repo: "AccountRepository") -> list[str]:
+async def _list_all_tokens(
+    repo: "AccountRepository", *, only_nsfw_disabled: bool = False
+) -> list[str]:
     page_num, tokens = 1, []
     while True:
         page = await repo.list_accounts(ListAccountsQuery(page=page_num, page_size=2000))
-        tokens.extend(r.token for r in page.items if is_manageable(r))
+        tokens.extend(
+            record.token
+            for record in page.items
+            if is_manageable(record)
+            and (not only_nsfw_disabled or "nsfw" not in (record.tags or []))
+        )
         if page_num >= page.total_pages or not page.items:
             break
         page_num += 1
@@ -88,17 +113,21 @@ async def _dispatch(
     *,
     use_async: bool,
     concurrency: int = 10,
+    batch_size: int = 0,
+    pause_sec: float = 0.0,
     repo: "AccountRepository | None" = None,
 ) -> Response:
     if use_async:
-        return await _dispatch_async(tokens, handler, concurrency)
-    return await _dispatch_sync(tokens, handler, concurrency, repo)
+        return await _dispatch_async(tokens, handler, concurrency, batch_size, pause_sec)
+    return await _dispatch_sync(tokens, handler, concurrency, batch_size, pause_sec, repo)
 
 
 async def _dispatch_sync(
     tokens: list[str],
     handler: Callable[[str], Awaitable[dict]],
     concurrency: int,
+    batch_size: int,
+    pause_sec: float,
     repo: "AccountRepository | None" = None,
 ) -> Response:
     """Concurrent execution, collect all results, return at once."""
@@ -113,7 +142,10 @@ async def _dispatch_sync(
         except Exception as exc:
             return token, None, str(exc)
 
-    raw = await run_batch(tokens, _wrapped, concurrency=concurrency)
+    raw = await run_batch(
+        tokens, _wrapped, concurrency=concurrency,
+        batch_size=batch_size, pause_sec=pause_sec,
+    )
     for token, data, err in raw:
         key = _mask(token)
         if err is None:
@@ -148,6 +180,8 @@ async def _dispatch_async(
     tokens: list[str],
     handler: Callable[[str], Awaitable[dict]],
     concurrency: int,
+    batch_size: int,
+    pause_sec: float,
 ) -> Response:
     """Background task with per-item progress via AsyncTask SSE."""
     task = create_task(len(tokens))
@@ -174,7 +208,10 @@ async def _dispatch_async(
                     results[masked] = {"error": str(exc)}
                     task.record(False, item=masked, error=str(exc))
 
-            await run_batch(tokens, _one, concurrency=concurrency)
+            await run_batch(
+                tokens, _one, concurrency=concurrency,
+                batch_size=batch_size, pause_sec=pause_sec,
+            )
 
             if task.cancelled:
                 task.finish_cancelled()
@@ -199,13 +236,35 @@ async def _dispatch_async(
 
 async def _nsfw_one(repo: "AccountRepository", token: str, enabled: bool) -> dict:
     from app.dataplane.reverse.protocol.xai_auth import nsfw_sequence, set_nsfw
-    if enabled:
-        await nsfw_sequence(token)
-    else:
-        await set_nsfw(token, enabled)
-    patch = AccountPatch(token=token, add_tags=["nsfw"]) if enabled else AccountPatch(token=token, remove_tags=["nsfw"])
-    await repo.patch_accounts([patch])
-    return {"success": True, "tagged": enabled}
+    retries = _config_int("batch.nsfw_max_retries", 3, minimum=0, maximum=5)
+    retry_base_sec = _config_float(
+        "batch.nsfw_retry_base_sec", 2.0, minimum=0.1, maximum=30.0,
+    )
+
+    for attempt in range(retries + 1):
+        try:
+            if enabled:
+                await nsfw_sequence(token)
+            else:
+                await set_nsfw(token, enabled)
+            patch = (
+                AccountPatch(token=token, add_tags=["nsfw"])
+                if enabled
+                else AccountPatch(token=token, remove_tags=["nsfw"])
+            )
+            await repo.patch_accounts([patch])
+            return {"success": True, "tagged": enabled}
+        except UpstreamError as exc:
+            if exc.status != 429 or attempt >= retries:
+                raise
+            delay = min(30.0, retry_base_sec * (2 ** attempt))
+            logger.warning(
+                "admin batch nsfw rate limited; retrying: token={} retry={} delay_s={}",
+                _mask(token), attempt + 1, delay,
+            )
+            await asyncio.sleep(delay)
+
+    raise RuntimeError("unreachable NSFW retry state")
 
 
 async def _cache_clear_one(repo: "AccountRepository", token: str) -> dict:
@@ -243,14 +302,27 @@ async def batch_nsfw(
     req: BatchRequest,
     async_mode: bool = Query(False, alias="async"),
     all_manageable: bool = Query(False),
+    all_nsfw_disabled: bool = Query(False),
     concurrency: int | None = Query(None, ge=1),
     enabled: bool = Query(True),
     repo: "AccountRepository" = Depends(get_repo),
 ):
     tokens = [t.strip() for t in req.tokens if t.strip()]
-    if all_manageable and tokens:
-        raise ValidationError("tokens must be empty when all_manageable=true", param="tokens")
-    if all_manageable:
+    if (all_manageable or all_nsfw_disabled) and tokens:
+        raise ValidationError(
+            "tokens must be empty when selecting all accounts", param="tokens"
+        )
+    if all_manageable and all_nsfw_disabled:
+        raise ValidationError(
+            "only one all-accounts selector may be used", param="all_manageable"
+        )
+    if all_nsfw_disabled:
+        if not enabled:
+            raise ValidationError(
+                "all_nsfw_disabled is only valid when enabling NSFW", param="enabled"
+            )
+        tokens = await _list_all_tokens(repo, only_nsfw_disabled=True)
+    elif all_manageable:
         tokens = await _list_all_tokens(repo)
     else:
         if not tokens:
@@ -268,9 +340,17 @@ async def batch_nsfw(
         return await _nsfw_one(repo, token, enabled)
 
     c = _concurrency(concurrency, "batch.nsfw_concurrency")
-    if all_manageable:
-        logger.info("admin batch nsfw all manageable: token_count={} concurrency={}", len(tokens), c)
-    return await _dispatch(tokens, _nsfw_and_tag, use_async=async_mode, concurrency=c)
+    batch_size = _config_int("batch.nsfw_batch_size", 25, minimum=1, maximum=200)
+    pause_sec = _config_float("batch.nsfw_pause_sec", 1.0, minimum=0.0, maximum=30.0)
+    if all_manageable or all_nsfw_disabled:
+        logger.info(
+            "admin batch nsfw all: only_nsfw_disabled={} token_count={} concurrency={} batch_size={} pause_sec={}",
+            all_nsfw_disabled, len(tokens), c, batch_size, pause_sec,
+        )
+    return await _dispatch(
+        tokens, _nsfw_and_tag, use_async=async_mode, concurrency=c,
+        batch_size=batch_size, pause_sec=pause_sec,
+    )
 
 
 @router.post("/refresh")

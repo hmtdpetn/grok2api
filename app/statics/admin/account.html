@@ -311,11 +311,18 @@
       flex:1 1 auto;
       overflow-x:auto;
       overflow-y:hidden;
-      scrollbar-width:none;
-      -ms-overflow-style:none;
+      overscroll-behavior-x:contain;
+      scrollbar-width:thin;
+      scrollbar-color:#c9c2b8 transparent;
+      padding-bottom:4px;
     }
     .filter-chip-list::-webkit-scrollbar {
-      display:none;
+      display:block;
+      height:5px;
+    }
+    .filter-chip-list::-webkit-scrollbar-thumb {
+      background:#c9c2b8;
+      border-radius:999px;
     }
     .toolbar-dropdown-panel .filter-label {
       width:34px;
@@ -2279,6 +2286,12 @@ function manageableTokens() {
     .map(t => t.token);
 }
 
+function nsfwDisabledManageableTokens() {
+  return allTokens
+    .filter(t => isManageableStatus(t.status) && !(t.tags || []).includes('nsfw'))
+    .map(t => t.token);
+}
+
 function selectedManageableTokens() {
   return allTokens
     .filter(t => sel.has(t.token) && isManageableStatus(t.status))
@@ -2334,13 +2347,13 @@ function batchNSFW() {
 }
 
 function batchNSFWAll() {
-  const n = manageableTokens().length;
-  if (!n) return showToast(tr('account.noManageableAccounts', null, '没有可操作的可用账户'), 'error');
+  const n = nsfwDisabledManageableTokens().length;
+  if (!n) return showToast('没有尚未开启 NSFW 的可用账户', 'error');
   openConfirm(
-    tr('account.nsfwAllConfirmTitle', null, '全部开启 NSFW'),
-    tr('account.nsfwAllConfirmBody', { n }, `为全部 <b>${n}</b> 个正常/限流账户开启 NSFW？<br><small style="color:var(--fg-muted)">该操作会按后端并发上限 50 分批执行。</small>`),
-    async () => _runBatch('/batch/nsfw?all_manageable=true', [],
-      tr('account.nsfwAllEnabling', { n }, `正在为 ${n} 个账户开启 NSFW…`),
+    '开启未启用的 NSFW',
+    `为全部 <b>${n}</b> 个尚未开启 NSFW 的正常/限流账户开启 NSFW？<br><small style="color:var(--fg-muted)">系统会以低并发分批执行，并在遇到 429 时自动退避重试。</small>`,
+    async () => _runBatch('/batch/nsfw?all_nsfw_disabled=true', [],
+      `正在为未开启 NSFW 的 ${n} 个账户执行…`,
       (ok, fail) => showToast(tr('account.nsfwDone', { ok, fail }, `NSFW 完成：成功 ${ok}，失败 ${fail}`), fail > 0 ? 'error' : 'success')
     )
   );

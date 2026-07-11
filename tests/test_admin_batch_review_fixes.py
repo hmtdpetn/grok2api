@@ -2,15 +2,17 @@ import asyncio
 import re
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import orjson
 
 from app.control.account.enums import AccountStatus
-from app.control.account.models import AccountRecord
+from app.control.account.models import AccountPage, AccountRecord
 from app.control.account.refresh import RefreshResult
 from app.control.account.backends.redis import RedisAccountRepository
-from app.platform.errors import ValidationError
-from app.products.web.admin.batch import BatchRequest, batch_refresh
+from app.platform.errors import UpstreamError, ValidationError
+from app.products.web.admin import batch as admin_batch
+from app.products.web.admin.batch import BatchRequest, batch_nsfw, batch_refresh
 from app.products.web.admin import tokens as admin_tokens
 
 
@@ -34,6 +36,28 @@ class _RefreshService:
     async def refresh_tokens(self, tokens: list[str]) -> RefreshResult:
         self.refreshed_tokens.extend(tokens)
         return RefreshResult(refreshed=len(tokens))
+
+
+class _NsfwRepo:
+    def __init__(self) -> None:
+        self.records = [
+            AccountRecord(token="off-token", status=AccountStatus.ACTIVE),
+            AccountRecord(token="on-token", status=AccountStatus.ACTIVE, tags=["nsfw"]),
+            AccountRecord(token="disabled-token", status=AccountStatus.DISABLED),
+        ]
+        self.patches = []
+
+    async def list_accounts(self, query):
+        return AccountPage(
+            items=self.records,
+            total=len(self.records),
+            page=1,
+            page_size=query.page_size,
+            total_pages=1,
+        )
+
+    async def patch_accounts(self, patches):
+        self.patches.extend(patches)
 
 
 class _Pipeline:
@@ -89,7 +113,9 @@ class AdminBatchReviewFixTests(unittest.IsolatedAsyncioTestCase):
         body = orjson.loads(response.body)
         self.assertEqual(repo.requested_tokens, ["active-token", "disabled-token"])
         self.assertEqual(refresh_svc.refreshed_tokens, ["active-token"])
-        self.assertEqual(body["summary"], {"total": 1, "ok": 1, "fail": 0})
+        self.assertEqual(body["summary"]["total"], 1)
+        self.assertEqual(body["summary"]["ok"], 1)
+        self.assertEqual(body["summary"]["fail"], 0)
 
     async def test_batch_refresh_rejects_only_non_manageable_explicit_tokens(self):
         repo = _Repo()
@@ -107,6 +133,43 @@ class AdminBatchReviewFixTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("No manageable tokens available", str(cm.exception))
         self.assertEqual(refresh_svc.refreshed_tokens, [])
+
+    async def test_batch_nsfw_all_disabled_skips_enabled_and_unmanageable_accounts(self):
+        repo = _NsfwRepo()
+        handler = AsyncMock(return_value={"success": True, "tagged": True})
+
+        with patch.object(admin_batch, "_nsfw_one", handler):
+            response = await batch_nsfw(
+                BatchRequest(tokens=[]),
+                async_mode=False,
+                all_manageable=False,
+                all_nsfw_disabled=True,
+                concurrency=1,
+                enabled=True,
+                repo=repo,
+            )
+
+        body = orjson.loads(response.body)
+        handler.assert_awaited_once_with(repo, "off-token", True)
+        self.assertEqual(body["summary"]["total"], 1)
+        self.assertEqual(body["summary"]["ok"], 1)
+
+    async def test_nsfw_retries_rate_limit_before_tagging_account(self):
+        repo = _NsfwRepo()
+        sequence = AsyncMock(side_effect=[UpstreamError("rate limited", status=429), None])
+
+        with (
+            patch("app.dataplane.reverse.protocol.xai_auth.nsfw_sequence", sequence),
+            patch.object(admin_batch, "_config_int", return_value=1),
+            patch.object(admin_batch, "_config_float", return_value=0.0),
+            patch("app.products.web.admin.batch.asyncio.sleep", AsyncMock()) as sleep,
+        ):
+            result = await admin_batch._nsfw_one(repo, "off-token", True)
+
+        self.assertEqual(result, {"success": True, "tagged": True})
+        self.assertEqual(sequence.await_count, 2)
+        sleep.assert_awaited_once_with(0.0)
+        self.assertEqual(len(repo.patches), 1)
 
 
 class RedisRepositoryReviewFixTests(unittest.IsolatedAsyncioTestCase):
@@ -145,6 +208,13 @@ class AccountHtmlReviewFixTests(unittest.TestCase):
             with self.subTest(locale=path.name):
                 self.assertIn("account", data, f"Locale {path.name} missing account section")
                 self.assertIn("rowActionNotSupported", data["account"])
+
+    def test_filter_chip_lists_keep_a_visible_horizontal_scrollbar(self):
+        html = Path("app/statics/admin/account.html").read_text(encoding="utf-8")
+
+        self.assertIn("scrollbar-width:thin", html)
+        self.assertIn(".filter-chip-list::-webkit-scrollbar-thumb", html)
+        self.assertNotIn(".filter-chip-list::-webkit-scrollbar {\n      display:none", html)
 
 
 class ConfigHtmlReviewFixTests(unittest.TestCase):
