@@ -395,7 +395,7 @@ const SCHEMA_DEF = [
         title: '基础访问控制', titleKey: 'config.schema.groups.baseAccess',
         section: 'app',
         fields: [
-          { key: 'app_url', label: 'APP 访问地址', labelKey: 'config.schema.fields.appUrl.label', type: 'text', desc: '应用对外提供服务的根 URL，格式如 https://your-domain.com。本地代理模式必须配置。', descKey: 'config.schema.fields.appUrl.desc', wide: true },
+          { key: 'app_url', label: 'APP 访问地址', labelKey: 'config.schema.fields.appUrl.label', type: 'text', desc: '应用对外提供服务的根 URL。本机可填 http://127.0.0.1:8000；局域网请填 Docker 主机地址，例如 http://192.168.1.2:8000。本地代理模式必须配置。', descKey: 'config.schema.fields.appUrl.desc', wide: true },
           { key: 'app_key', label: 'APP 访问密码', labelKey: 'config.schema.fields.appKey.label', type: 'password', desc: '管理后台鉴权密码。修改后已有 Session 将立即失效，需重新登录。', descKey: 'config.schema.fields.appKey.desc', rand: true },
           { key: 'api_key', label: 'API 调用密钥', labelKey: 'config.schema.fields.apiKey.label', type: 'text', desc: 'OpenAI 兼容 API 的鉴权密钥。多个值请使用英文逗号分隔；留空则禁用鉴权。', descKey: 'config.schema.fields.apiKey.desc', rand: true },
           { key: 'webui_enabled', label: '启用 WebUI', labelKey: 'config.schema.fields.webuiEnabled.label', type: 'bool', desc: '开放 WebUI 功能入口。关闭后相关路由将返回 404。', descKey: 'config.schema.fields.webuiEnabled.desc' },
