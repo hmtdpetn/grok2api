@@ -121,6 +121,8 @@ heavy_interval_sec = 7200    # heavy 号池周期（秒）：quota 模式用于�
 usage_concurrency = 15       # 刷新并发数：与 SQL pool_size(5)+max_overflow(10) 对齐，避免连接池耗尽（L6 修复）
 # 单次导入后立即探测配额的账号上限；超过时仅保存账号，交由后续调度处理，0 = 始终延后
 import_immediate_limit = 500
+# 导入达到此数量时改为后台任务，并在管理页面显示真实 SQLite 写入进度；避免浏览器长请求断开，0 不建议使用
+import_async_threshold = 1000
 on_demand_min_interval_sec = 300
 
 

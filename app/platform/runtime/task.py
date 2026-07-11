@@ -58,11 +58,32 @@ class AsyncTask:
         detail: Any = None,
         error: str = "",
     ) -> None:
-        self.processed += 1
+        self.record_many(
+            success,
+            1,
+            item=item,
+            detail=detail,
+            error=error,
+        )
+
+    def record_many(
+        self,
+        success: bool,
+        count: int,
+        *,
+        item: Any = None,
+        detail: Any = None,
+        error: str = "",
+    ) -> None:
+        """Record a completed group while emitting one aggregate progress event."""
+        count = max(0, int(count))
+        if count == 0:
+            return
+        self.processed += count
         if success:
-            self.ok += 1
+            self.ok += count
         else:
-            self.fail += 1
+            self.fail += count
         event: Dict[str, Any] = {
             "type": "progress",
             "task_id": self.id,

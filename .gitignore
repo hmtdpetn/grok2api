@@ -45,6 +45,8 @@ logs/
 # Data
 data/
 app/data/
+# Local account exports may contain SSO credentials; never commit them.
+tokens-*.json
 
 # Testing
 .pytest_cache/

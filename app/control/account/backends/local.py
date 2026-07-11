@@ -5,7 +5,7 @@ import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.platform.runtime.clock import now_ms
 from ..commands import AccountPatch, AccountUpsert, BulkReplacePoolCommand, ListAccountsQuery
@@ -217,6 +217,7 @@ class LocalAccountRepository:
         conn: sqlite3.Connection,
         items: list[AccountUpsert],
         revision: int,
+        progress: Callable[[int], None] | None = None,
     ) -> int:
         ts = now_ms()
 
@@ -263,8 +264,7 @@ class LocalAccountRepository:
             return 0
 
         # 批量插入（1 次 executemany 代替 N 次 execute）
-        conn.executemany(
-            f"""
+        sql = f"""
             INSERT INTO {_TBL} (
                 token, pool, status, created_at, updated_at,
                 tags, quota_auto, quota_fast, quota_expert, quota_heavy, quota_grok_4_3, quota_console,
@@ -284,9 +284,14 @@ class LocalAccountRepository:
                 quota_console  = excluded.quota_console,
                 ext            = excluded.ext,
                 revision       = excluded.revision
-            """,
-            rows,
-        )
+        """
+        # Keep one transaction for consistency, but execute in observable
+        # chunks so a long Docker bind-mount write can report real progress.
+        for start in range(0, len(rows), 500):
+            batch = rows[start:start + 500]
+            conn.executemany(sql, batch)
+            if progress:
+                progress(len(batch))
         return len(rows)
 
     def _patch_sync(
@@ -419,9 +424,24 @@ class LocalAccountRepository:
             with closing(self._connect()) as conn:
                 rev = self._get_revision_sync(conn)
                 rows = conn.execute(
-                    f"SELECT * FROM {_TBL} WHERE revision > ? ORDER BY revision LIMIT ?",
+                    f"SELECT * FROM {_TBL} WHERE revision > ? ORDER BY revision, token LIMIT ?",
                     (since_revision, limit),
                 ).fetchall()
+
+                # One bulk import assigns a shared revision to every row.
+                # The runtime advances by revision, so never split that group
+                # across pages or the unreturned rows would be skipped.
+                if len(rows) == limit:
+                    last_revision = int(rows[-1]["revision"])
+                    last_token = rows[-1]["token"]
+                    rows.extend(conn.execute(
+                        f"""
+                        SELECT * FROM {_TBL}
+                        WHERE revision = ? AND token > ?
+                        ORDER BY token
+                        """,
+                        (last_revision, last_token),
+                    ).fetchall())
                 items: list[AccountRecord] = []
                 deleted: list[str] = []
                 batch_max_rev = 0
@@ -433,7 +453,10 @@ class LocalAccountRepository:
                         deleted.append(r.token)
                     else:
                         items.append(r)
-                has_more = len(rows) == limit
+                has_more = bool(rows) and conn.execute(
+                    f"SELECT 1 FROM {_TBL} WHERE revision > ? LIMIT 1",
+                    (batch_max_rev,),
+                ).fetchone() is not None
                 return AccountChangeSet(
                     revision=rev,
                     batch_max_revision=batch_max_rev,
@@ -454,6 +477,25 @@ class LocalAccountRepository:
             with closing(self._connect()) as conn:
                 rev   = self._bump_revision(conn)
                 count = self._upsert_sync(conn, items, rev)
+                conn.commit()
+                return AccountMutationResult(upserted=count, revision=rev)
+
+        async with self._lock:
+            return await asyncio.to_thread(_sync)
+
+    async def upsert_accounts_with_progress(
+        self,
+        items: list[AccountUpsert],
+        progress: Callable[[int], None],
+    ) -> AccountMutationResult:
+        """Upsert accounts while reporting committed-work progress to the caller."""
+        if not items:
+            return AccountMutationResult()
+
+        def _sync() -> AccountMutationResult:
+            with closing(self._connect()) as conn:
+                rev = self._bump_revision(conn)
+                count = self._upsert_sync(conn, items, rev, progress)
                 conn.commit()
                 return AccountMutationResult(upserted=count, revision=rev)
 
@@ -509,11 +551,17 @@ class LocalAccountRepository:
 
         def _sync() -> list[AccountRecord]:
             with closing(self._connect()) as conn:
-                placeholders = ",".join("?" * len(tokens))
-                rows = conn.execute(
-                    f"SELECT * FROM {_TBL} WHERE token IN ({placeholders})",
-                    tokens,
-                ).fetchall()
+                # SQLite commonly caps a statement at 999 bound parameters.
+                # TXT imports can contain many thousands of tokens, so read in
+                # safe chunks instead of failing before their progress task starts.
+                rows: list[sqlite3.Row] = []
+                for start in range(0, len(tokens), 900):
+                    batch = tokens[start:start + 900]
+                    placeholders = ",".join("?" * len(batch))
+                    rows.extend(conn.execute(
+                        f"SELECT * FROM {_TBL} WHERE token IN ({placeholders})",
+                        batch,
+                    ).fetchall())
                 return [self._row_to_record(r) for r in rows]
 
         return await asyncio.to_thread(_sync)
@@ -603,6 +651,30 @@ class LocalAccountRepository:
 
         return await asyncio.to_thread(_sync)
 
+    async def list_token_payload_page(
+        self,
+        *,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return a stable compact admin-list page plus its live total."""
+        offset = max(0, int(offset))
+        limit = max(1, min(int(limit), 1000))
+
+        def _sync() -> tuple[list[dict[str, Any]], int]:
+            with closing(self._connect()) as conn:
+                total = conn.execute(
+                    f"SELECT COUNT(*) FROM {_TBL} WHERE deleted_at IS NULL"
+                ).fetchone()[0]
+                sql = self._token_payload_select_sql().replace(
+                    "ORDER BY updated_at DESC",
+                    "ORDER BY updated_at DESC, token ASC LIMIT ? OFFSET ?",
+                )
+                rows = conn.execute(sql, (limit, offset))
+                return [self._row_to_token_payload(row) for row in rows], int(total)
+
+        return await asyncio.to_thread(_sync)
+
     async def list_invalid_tokens(self) -> list[str]:
         def _sync() -> list[str]:
             with closing(self._connect()) as conn:
@@ -683,6 +755,32 @@ class LocalAccountRepository:
                 # Bump revision again for upserts.
                 rev = self._bump_revision(conn)
                 upserted = self._upsert_sync(conn, command.upserts, rev)
+                conn.commit()
+                return AccountMutationResult(
+                    upserted=upserted, deleted=deleted, revision=rev
+                )
+
+        async with self._lock:
+            return await asyncio.to_thread(_sync)
+
+    async def replace_pool_with_progress(
+        self,
+        command: BulkReplacePoolCommand,
+        progress: Callable[[int], None],
+    ) -> AccountMutationResult:
+        """Atomically replace a pool and report each SQLite write chunk."""
+        def _sync() -> AccountMutationResult:
+            ts = now_ms()
+            with closing(self._connect()) as conn:
+                rev = self._bump_revision(conn)
+                conn.execute(
+                    f"UPDATE {_TBL} SET deleted_at = ?, updated_at = ?, revision = ? "
+                    f"WHERE pool = ? AND deleted_at IS NULL",
+                    (ts, ts, rev, command.pool),
+                )
+                deleted = conn.execute("SELECT changes()").fetchone()[0]
+                rev = self._bump_revision(conn)
+                upserted = self._upsert_sync(conn, command.upserts, rev, progress)
                 conn.commit()
                 return AccountMutationResult(
                     upserted=upserted, deleted=deleted, revision=rev

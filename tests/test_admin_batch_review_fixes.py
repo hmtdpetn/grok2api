@@ -159,6 +159,7 @@ class ConfigHtmlReviewFixTests(unittest.TestCase):
 class AdminTokenTaskReviewFixTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         getattr(admin_tokens, "_background_tasks", set()).clear()
+        admin_tokens._active_import_task_id = None
 
     async def asyncTearDown(self) -> None:
         pending = list(getattr(admin_tokens, "_background_tasks", set()))
@@ -167,6 +168,7 @@ class AdminTokenTaskReviewFixTests(unittest.IsolatedAsyncioTestCase):
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         getattr(admin_tokens, "_background_tasks", set()).clear()
+        admin_tokens._active_import_task_id = None
 
     async def test_fire_and_forget_keeps_task_until_completion(self):
         release = asyncio.Event()
@@ -181,6 +183,38 @@ class AdminTokenTaskReviewFixTests(unittest.IsolatedAsyncioTestCase):
         await task
         await asyncio.sleep(0)
         self.assertNotIn(task, admin_tokens._background_tasks)
+
+    async def test_large_replace_import_reports_chunked_progress(self):
+        class _ProgressRepo:
+            async def replace_pool_with_progress(self, command, progress):
+                for start in range(0, len(command.upserts), 500):
+                    progress(len(command.upserts[start:start + 500]))
+
+        original_threshold = admin_tokens._import_async_threshold
+        admin_tokens._import_async_threshold = lambda: 1
+        self.addCleanup(setattr, admin_tokens, "_import_async_threshold", original_threshold)
+
+        tokens = [f"token-{i}" for i in range(1001)]
+        response = await admin_tokens.save_tokens(
+            admin_tokens.SaveTokensRequest({"basic": tokens}),
+            auto_nsfw=False,
+            repo=_ProgressRepo(),
+            refresh_svc=object(),
+        )
+        body = orjson.loads(response.body)
+        self.assertEqual(response.status_code, 202)
+        self.assertFalse(body["already_running"])
+
+        task = admin_tokens.get_task(body["task_id"])
+        for _ in range(100):
+            if task and task.status != "running":
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertIsNotNone(task)
+        self.assertEqual(task.status, "done")
+        self.assertEqual(task.processed, 1001)
+        self.assertEqual(task.result["count"], 1001)
 
 
 if __name__ == "__main__":
