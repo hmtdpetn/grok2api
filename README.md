@@ -53,7 +53,7 @@
 | :--- | :--- | :--- |
 | **适用场景** | IP 干净，能直连 grok.com | IP 被封锁（中国大陆等），需代理 |
 | **部署方式** | Docker 单容器 / Docker Compose | Docker Compose（4 个服务） |
-| **代码来源** | 当前文件直接拉取 `jiujiu532` 的预构建镜像 | 从当前仓库本地构建镜像 |
+| **代码来源** | 从当前仓库本地构建镜像 | 从当前仓库本地构建镜像 |
 | **出口网络** | 直连 | WARP WireGuard 隧道 → Cloudflare 全球网络 |
 | **CF 反爬** | 可能被 403 拦截 | FlareSolverr 自动解 JS 挑战 |
 | **成功率** | ~30%（被墙环境） | ~95%+ |
@@ -71,7 +71,7 @@ grok2api 容器
 
 > **重要**：防封版仅支持 Docker 部署，因为 WARP 容器需要 `NET_ADMIN` 内核能力和 Linux 容器引擎。Windows/macOS 请使用 Docker Desktop 的 Linux 容器模式，并确保虚拟化/WSL2 可用；部分嵌套虚拟机环境可能不支持这些能力。
 
-> **版本提醒**：当前 `docker-compose.yml` 直接使用 `ghcr.io/jiujiu532/grok2api:latest`，不会构建本仓库工作目录；上面的本仓库附加改动由 `docker-compose.warp.yml` 的本地构建提供。若标准版也要使用这些改动，应先将标准版编排改为本地构建。
+> **版本提醒**：两个版本都会从当前仓库本地构建镜像，因此都包含本仓库的 UI、图片错误处理与批量账号管理改动；差别仅在于防封版额外使用 WARP、Privoxy 与 FlareSolverr。
 
 ---
 
@@ -90,7 +90,7 @@ grok2api 容器
 git clone https://github.com/hmtdpetn/grok2api
 cd grok2api
 cp .env.example .env
-docker compose up -d
+docker compose up -d --build
 ```
 
 访问 `http://localhost:8000/admin/login`，默认密码 `grok2api`。
@@ -328,7 +328,7 @@ curl http://localhost:8000/v1/messages \
 
 | 文件 | 用途 |
 | :--- | :--- |
-| `docker-compose.yml` | 标准版 — 单容器直连部署 |
+| `docker-compose.yml` | 标准版 — 单服务直连部署（本地构建） |
 | `docker-compose.warp.yml` | 防封版 — WARP + Privoxy + FlareSolverr 全套（4 个服务） |
 
 ---
@@ -350,6 +350,10 @@ curl http://localhost:8000/v1/messages \
 ### 如何更新代码？
 ```bash
 git pull
+# 标准版
+docker compose up -d --build
+
+# 防封版
 docker compose -f docker-compose.warp.yml build grok2api
 docker compose -f docker-compose.warp.yml up -d grok2api
 ```
