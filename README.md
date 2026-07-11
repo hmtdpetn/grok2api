@@ -329,7 +329,7 @@ curl http://localhost:8000/v1/messages \
 | 文件 | 用途 |
 | :--- | :--- |
 | `docker-compose.yml` | 标准版 — 单容器直连部署 |
-| `docker-compose.warp.yml` | 防封版 — WARP + Privoxy + FlareSolverr 全套（5 容器） |
+| `docker-compose.warp.yml` | 防封版 — WARP + Privoxy + FlareSolverr 全套（4 个服务） |
 
 ---
 
