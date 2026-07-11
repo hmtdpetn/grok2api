@@ -36,7 +36,7 @@ function showToast(message, type = 'success') {
  * Show a persistent progress toast that stays open until finish() is called.
  *
  * @param {string} label  Initial label text shown inside the toast.
- * @returns {{ update(done, total): void, finish(msg, type?): void, dismiss(): void }}
+ * @returns {{ update(done, total, label?): void, finish(msg, type?): void, dismiss(): void }}
  *
  * Usage:
  *   const p = showProgressToast('正在刷新 Usage…');
@@ -68,10 +68,11 @@ function showProgressToast(label) {
   }
 
   return {
-    update(done, total) {
+    update(done, total, label) {
       const pct = total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0;
       fill.style.width = pct + '%';
       countEl.textContent = total > 0 ? `${done} / ${total}` : `${done}`;
+      if (label != null) labelEl.textContent = String(label);
     },
     finish(msg, type = 'success') {
       const tone = type === 'error' ? 'error' : 'success';

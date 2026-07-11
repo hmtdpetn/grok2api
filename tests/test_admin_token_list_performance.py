@@ -35,6 +35,15 @@ class _FastListRepo:
         raise AssertionError("list_tokens should use the compact token payload path")
 
 
+class _FastPageRepo:
+    def __init__(self) -> None:
+        self.received: tuple[int, int] | None = None
+
+    async def list_token_payload_page(self, *, offset: int, limit: int):
+        self.received = (offset, limit)
+        return ([{"token": "tok-1", "pool": "basic", "status": "active", "quota": {}, "tags": []}], 23190)
+
+
 class _FastInvalidRepo:
     def __init__(self) -> None:
         self.fast_called = False
@@ -82,6 +91,17 @@ class AdminTokenListPerformanceTests(unittest.IsolatedAsyncioTestCase):
         body = orjson.loads(response.body)
         self.assertTrue(repo.fast_called)
         self.assertFalse(repo.list_called)
+        self.assertEqual(body["tokens"][0]["token"], "tok-1")
+
+    async def test_list_tokens_page_uses_fast_page_path(self):
+        repo = _FastPageRepo()
+
+        response = await admin_tokens.list_tokens(offset=500, limit=500, repo=repo)
+
+        body = orjson.loads(response.body)
+        self.assertEqual(repo.received, (500, 500))
+        self.assertEqual(body["total"], 23190)
+        self.assertEqual(body["offset"], 500)
         self.assertEqual(body["tokens"][0]["token"], "tok-1")
 
     async def test_local_repository_returns_compact_token_payloads(self):
@@ -150,6 +170,21 @@ class AdminTokenListPerformanceTests(unittest.IsolatedAsyncioTestCase):
                 }
 
         self.assertIn("idx_acc_live_updated", indexes)
+
+    async def test_local_change_scan_keeps_a_bulk_revision_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalAccountRepository(Path(tmp) / "accounts.db")
+            await repo.initialize()
+            await repo.upsert_accounts([
+                AccountUpsert(token=f"token-{i}", pool="basic")
+                for i in range(5001)
+            ])
+
+            changes = await repo.scan_changes(0, limit=5000)
+
+        self.assertEqual(len(changes.items), 5001)
+        self.assertFalse(changes.has_more)
+        self.assertEqual(changes.batch_max_revision, changes.revision)
 
     async def test_local_repository_token_payload_query_uses_live_updated_index(self):
         with tempfile.TemporaryDirectory() as tmp:

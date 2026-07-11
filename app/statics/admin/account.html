@@ -311,11 +311,18 @@
       flex:1 1 auto;
       overflow-x:auto;
       overflow-y:hidden;
-      scrollbar-width:none;
-      -ms-overflow-style:none;
+      overscroll-behavior-x:contain;
+      scrollbar-width:thin;
+      scrollbar-color:#c9c2b8 transparent;
+      padding-bottom:4px;
     }
     .filter-chip-list::-webkit-scrollbar {
-      display:none;
+      display:block;
+      height:5px;
+    }
+    .filter-chip-list::-webkit-scrollbar-thumb {
+      background:#c9c2b8;
+      border-radius:999px;
     }
     .toolbar-dropdown-panel .filter-label {
       width:34px;
@@ -1136,6 +1143,8 @@ let _filterMenuBound = false;
 let _tokenViewVersion = 0;
 let _tokenViewCacheKey = '';
 let _tokenViewCache = null;
+let _tokenLoadGeneration = 0;
+let _tokenLoadProgress = null;
 
 function invalidateTokenView() {
   _tokenViewVersion += 1;
@@ -1216,11 +1225,14 @@ let selectionStrategy = 'quota';
 
 // ── Load ───────────────────────────────────────────────────────────────────
 async function load() {
+  const generation = ++_tokenLoadGeneration;
   try {
-    const [data, status] = await Promise.all([
-      _api('GET', '/tokens'),
+    const [data, status, importTask] = await Promise.all([
+      _api('GET', '/tokens?offset=0&limit=500'),
       _api('GET', '/status').catch(() => null),
+      _api('GET', '/tokens/import/status').catch(() => null),
     ]);
+    if (generation !== _tokenLoadGeneration) return;
     if (status && typeof status.selection_strategy === 'string') {
       selectionStrategy = status.selection_strategy;
     }
@@ -1231,7 +1243,49 @@ async function load() {
     applyStrategyUI();
     invalidateTokenView();
     render();
+    if (importTask?.task_id && importTask.status === 'running') {
+      _watchImportTask(importTask.task_id, importTask.total || 0, true);
+    }
+    const total = Number(data.total ?? allTokens.length) || 0;
+    if (total > allTokens.length) {
+      _loadRemainingTokenPages(generation, total, allTokens.length);
+    }
   } catch (e) { showToast(`${tr('account.loadFailed', null, '加载失败')}: ${e.message}`, 'error'); }
+}
+
+async function _loadRemainingTokenPages(generation, total, loaded) {
+  if (_tokenLoadProgress) _tokenLoadProgress.dismiss();
+  const progress = showProgressToast(`正在加载账户：已显示 ${loaded} / ${total}`);
+  _tokenLoadProgress = progress;
+  progress.update(loaded, total, `正在加载账户：已显示 ${loaded} / ${total}`);
+  const pageSize = 500;
+
+  try {
+    for (let offset = loaded; offset < total && generation === _tokenLoadGeneration; offset += pageSize * 4) {
+      const offsets = [];
+      for (let n = 0; n < 4 && offset + n * pageSize < total; n++) offsets.push(offset + n * pageSize);
+      const pages = await Promise.all(offsets.map(pageOffset =>
+        _api('GET', `/tokens?offset=${pageOffset}&limit=${pageSize}`)
+      ));
+      if (generation !== _tokenLoadGeneration) return;
+      for (const page of pages) {
+        if (Array.isArray(page.tokens)) allTokens.push(...page.tokens);
+      }
+      invalidateTokenView();
+      render();
+      const displayed = Math.min(allTokens.length, total);
+      progress.update(displayed, total, `正在加载账户：已显示 ${displayed} / ${total}`);
+    }
+    if (generation === _tokenLoadGeneration) {
+      progress.finish(`账户加载完成，共 ${allTokens.length} 个`, 'success');
+    }
+  } catch (e) {
+    if (generation === _tokenLoadGeneration) {
+      progress.finish(`其余账户加载失败：${e.message}`, 'error');
+    }
+  } finally {
+    if (_tokenLoadProgress === progress) _tokenLoadProgress = null;
+  }
 }
 
 function applyStrategyUI() {
@@ -1769,6 +1823,78 @@ async function doAdd() {
   );
 }
 
+let _importTaskId = null;
+let _importTaskEs = null;
+let _importProgress = null;
+
+async function _watchImportTask(taskId, total, alreadyRunning = false) {
+  if (_importTaskId === taskId && _importTaskEs) return;
+  if (_importTaskEs) _importTaskEs.close();
+  if (_importProgress) _importProgress.dismiss();
+
+  _importTaskId = taskId;
+  const label = alreadyRunning
+    ? '已连接到正在进行的导入…'
+    : '正在保存导入文件…';
+  const progress = showProgressToast(label);
+  _importProgress = progress;
+  progress.update(0, total);
+
+  try {
+    const key = await adminKey.get();
+    const es = new EventSource(`${ADMIN_API}/batch/${taskId}/stream?app_key=${encodeURIComponent(key)}`);
+    _importTaskEs = es;
+    let finalReceived = false;
+
+    function cleanup() {
+      es.close();
+      if (_importTaskEs === es) _importTaskEs = null;
+      if (_importTaskId === taskId) _importTaskId = null;
+      if (_importProgress === progress) _importProgress = null;
+    }
+
+    es.onmessage = (e) => {
+      const event = JSON.parse(e.data);
+      const eventTotal = event.total || total;
+      if (event.type === 'snapshot' || event.type === 'progress') {
+        progress.update(event.processed || 0, eventTotal);
+        return;
+      }
+      if (!['done', 'error', 'cancelled'].includes(event.type)) return;
+
+      finalReceived = true;
+      cleanup();
+      if (event.type !== 'done') {
+        progress.finish(event.error || '导入已停止', 'error');
+        return;
+      }
+
+      const result = event.result || {};
+      const count = result.count ?? event.ok ?? eventTotal;
+      const skipped = result.skipped || 0;
+      const message = result.mode === 'add'
+        ? (skipped ? `导入完成：新增 ${count}，已存在跳过 ${skipped}` : `导入完成：新增 ${count} 个`)
+        : `导入完成，共 ${count} 个`;
+      progress.finish(message, 'success');
+      if (result.maintenance_deferred) {
+        showToast('账号已保存；大量账号的配额同步将由后台分时处理', 'info');
+      }
+      load();
+    };
+
+    es.onerror = function() {
+      if (finalReceived || this.readyState !== EventSource.CLOSED) return;
+      cleanup();
+      progress.finish('进度连接中断；刷新页面可重新查看仍在进行的导入', 'error');
+    };
+  } catch (e) {
+    _importTaskId = null;
+    _importTaskEs = null;
+    _importProgress = null;
+    progress.finish(`无法连接导入进度：${e.message}`, 'error');
+  }
+}
+
 async function doImport() {
   const file = document.getElementById('import-file').files?.[0];
   if (!file) return showToast(tr('account.selectFile', null, '请选择文件'), 'error');
@@ -1786,17 +1912,25 @@ async function doImport() {
     if (!total) return showToast(tr('account.jsonEmpty', null, 'JSON 文件中没有可导入的 Token'), 'error');
     const submit = document.querySelector('#modal-import-file .dialog-btn-primary');
     if (submit?.disabled) return;
+    const progress = showProgressToast(tr('account.importing', { n: total }, `正在导入 ${total} 个账户…`));
+    progress.update(0, total);
     try {
       if (submit) submit.disabled = true;
-      showToast(tr('account.importing', { n: total }, `正在导入 ${total} 个账户…`), 'info');
       const result = await _api('POST', `/tokens?auto_nsfw=${autoNsfw}`, parsed);
       closeModal('modal-import-file');
+      if (result.task_id) {
+        progress.dismiss();
+        await _watchImportTask(result.task_id, result.total || total, result.already_running);
+        return;
+      }
+      progress.update(total, total);
+      progress.finish(tr('account.importJsonDone', { n: total }, `导入完成，共 ${total} 个`), 'success');
       showToast(tr('account.importJsonDone', { n: total }, `导入完成，共 ${total} 个`), 'success');
       if (result.maintenance_deferred) {
         showToast('账号已保存；大量账号的配额同步将由后台分时处理', 'info');
       }
       load();
-    } catch (e) { showToast(`${tr('account.importFailed', null, '导入失败')}: ${e.message}`, 'error'); }
+    } catch (e) { progress.finish(`${tr('account.importFailed', null, '导入失败')}: ${e.message}`, 'error'); }
     finally { if (submit) submit.disabled = false; }
   } else {
     // TXT 格式: 每行一个 token
@@ -1847,16 +1981,23 @@ function updateImportFileState() {
 
 async function saveTokens(pool, newToks, autoNsfw, modalId, pendingMessage, successPrefix, errorPrefix) {
   const unique = [...new Set(newToks)];
+  const progress = showProgressToast(pendingMessage);
+  progress.update(0, unique.length);
   try {
-    showToast(pendingMessage, 'info');
     const d = await _api('POST', `/tokens/add?auto_nsfw=${autoNsfw}`, { pool, tokens: unique });
     closeModal(modalId);
+    if (d.task_id) {
+      progress.dismiss();
+      await _watchImportTask(d.task_id, d.total || unique.length, d.already_running);
+      return;
+    }
+    progress.update(unique.length, unique.length);
     const msg = d.skipped
       ? tr('account.saveResultSkipped', { prefix: successPrefix, count: d.count, skipped: d.skipped }, `${successPrefix}，新增 ${d.count}，已存在跳过 ${d.skipped}`)
       : tr('account.saveResult', { prefix: successPrefix, count: d.count }, `${successPrefix}，新增 ${d.count} 个`);
-    showToast(msg, 'success');
+    progress.finish(msg, 'success');
     load();
-  } catch (e) { showToast(`${errorPrefix}: ${e.message}`, 'error'); }
+  } catch (e) { progress.finish(`${errorPrefix}: ${e.message}`, 'error'); }
 }
 
 // ── Export ─────────────────────────────────────────────────────────────────
@@ -2145,6 +2286,12 @@ function manageableTokens() {
     .map(t => t.token);
 }
 
+function nsfwDisabledManageableTokens() {
+  return allTokens
+    .filter(t => isManageableStatus(t.status) && !(t.tags || []).includes('nsfw'))
+    .map(t => t.token);
+}
+
 function selectedManageableTokens() {
   return allTokens
     .filter(t => sel.has(t.token) && isManageableStatus(t.status))
@@ -2200,13 +2347,13 @@ function batchNSFW() {
 }
 
 function batchNSFWAll() {
-  const n = manageableTokens().length;
-  if (!n) return showToast(tr('account.noManageableAccounts', null, '没有可操作的可用账户'), 'error');
+  const n = nsfwDisabledManageableTokens().length;
+  if (!n) return showToast('没有尚未开启 NSFW 的可用账户', 'error');
   openConfirm(
-    tr('account.nsfwAllConfirmTitle', null, '全部开启 NSFW'),
-    tr('account.nsfwAllConfirmBody', { n }, `为全部 <b>${n}</b> 个正常/限流账户开启 NSFW？<br><small style="color:var(--fg-muted)">该操作会按后端并发上限 50 分批执行。</small>`),
-    async () => _runBatch('/batch/nsfw?all_manageable=true', [],
-      tr('account.nsfwAllEnabling', { n }, `正在为 ${n} 个账户开启 NSFW…`),
+    '开启未启用的 NSFW',
+    `为全部 <b>${n}</b> 个尚未开启 NSFW 的正常/限流账户开启 NSFW？<br><small style="color:var(--fg-muted)">系统会以低并发分批执行，并在遇到 429 时自动退避重试。</small>`,
+    async () => _runBatch('/batch/nsfw?all_nsfw_disabled=true', [],
+      `正在为未开启 NSFW 的 ${n} 个账户执行…`,
       (ok, fail) => showToast(tr('account.nsfwDone', { ok, fail }, `NSFW 完成：成功 ${ok}，失败 ${fail}`), fail > 0 ? 'error' : 'success')
     )
   );
