@@ -39,16 +39,16 @@ else:
         import re
         # 移除旧的 proxy.egress 和 proxy.clearance 段
         content = re.sub(
-            r'\[proxy\.egress\].*?(?=\[|\Z)',
+            r'^\[proxy\.egress\].*?(?=^\[|\Z)',
             '',
             content,
-            flags=re.DOTALL,
+            flags=re.DOTALL | re.MULTILINE,
         )
         content = re.sub(
-            r'\[proxy\.clearance\].*?(?=\[|\Z)',
+            r'^\[proxy\.clearance\].*?(?=^\[|\Z)',
             '',
             content,
-            flags=re.DOTALL,
+            flags=re.DOTALL | re.MULTILINE,
         )
         content = content.rstrip() + "\n" + PROXY_CONFIG.strip() + "\n"
         CONFIG_PATH.write_text(content)

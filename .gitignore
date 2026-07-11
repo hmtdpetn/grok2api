@@ -57,3 +57,6 @@ htmlcov/
 # Local analysis docs (not for public repo)
 docs/
 .tools/
+
+# Local Docker test instances
+.runtime/

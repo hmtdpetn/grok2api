@@ -54,7 +54,8 @@ services:
       ACCOUNT_REDIS_URL: ${ACCOUNT_REDIS_URL:-}
       ACCOUNT_MYSQL_URL: ${ACCOUNT_MYSQL_URL:-}
       ACCOUNT_POSTGRESQL_URL: ${ACCOUNT_POSTGRESQL_URL:-}
-      # Grok2API entrypoint 会检测 init_proxy_config.py 存在并自动写入代理配置
+      # 仅防封版启用：由 entrypoint 写入 Privoxy 与 FlareSolverr 配置。
+      ENABLE_ANTI_BAN_PROXY: "true"
     volumes:
       - grok_data:/app/data
       - grok_logs:/app/logs

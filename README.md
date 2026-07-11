@@ -95,6 +95,8 @@ docker compose up -d --build
 
 访问 `http://localhost:8000/admin/login`，默认密码 `grok2api`。
 
+> 若需与防封版同时运行，可改用其他端口，并为标准版设置独立容器名、数据目录和日志目录：`HOST_PORT=8001 CONTAINER_NAME=grok2api-standard GROK_DATA_DIR=./.runtime/standard/data GROK_LOG_DIR=./.runtime/standard/logs docker compose -p grok2api-standard up -d --build`。Windows PowerShell 请先用 `$env:变量名 = '值'` 设置这些变量。
+
 **本地 Python 运行:**
 
 ```bash

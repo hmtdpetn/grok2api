@@ -1,6 +1,6 @@
 services:
   grok2api:
-    container_name: grok2api
+    container_name: ${CONTAINER_NAME:-grok2api}
     # Build this checkout so the standard edition includes this repository's
     # UI, error-handling, and account-management improvements.
     build: .
@@ -28,8 +28,8 @@ services:
       # ACCOUNT_MYSQL_URL: MySQL DSN when ACCOUNT_STORAGE=mysql
       # ACCOUNT_POSTGRESQL_URL: PostgreSQL DSN when ACCOUNT_STORAGE=postgresql
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - ${GROK_DATA_DIR:-./data}:/app/data
+      - ${GROK_LOG_DIR:-./logs}:/app/logs
     restart: unless-stopped
 
   # 如果出口 IP 不干净，可取消以下注释使用 Warp 作为落地代理

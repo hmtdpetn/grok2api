@@ -3,9 +3,9 @@ set -eu
 
 /app/scripts/init_storage.sh
 
-# When deploying the anti-ban (WARP) stack, auto-configure proxy settings
-# before the application starts so grok2api can reach grok.com through the tunnel.
-if [ -f /app/scripts/init_proxy_config.py ]; then
+# The anti-ban Compose file explicitly enables this.  Standard deployments
+# must retain their direct proxy configuration.
+if [ "${ENABLE_ANTI_BAN_PROXY:-false}" = "true" ] && [ -f /app/scripts/init_proxy_config.py ]; then
     python3 /app/scripts/init_proxy_config.py 2>/dev/null || true
 fi
 
