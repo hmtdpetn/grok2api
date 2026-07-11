@@ -771,7 +771,12 @@ async def _refresh_then_auto_nsfw(
 
 
 async def _enable_nsfw_imported(repo: "AccountRepository", tokens: list[str]) -> None:
-    from app.products.web.admin.batch import _concurrency, _nsfw_one
+    from app.products.web.admin.batch import (
+        _concurrency,
+        _config_float,
+        _config_int,
+        _nsfw_one,
+    )
     from app.platform.runtime.batch import run_batch
 
     records = await repo.get_accounts(tokens)
@@ -793,7 +798,13 @@ async def _enable_nsfw_imported(repo: "AccountRepository", tokens: list[str]) ->
             fail_c += 1
             logger.warning("admin import auto nsfw failed: token={} error={}", _mask(token), exc)
 
-    await run_batch(manageable_tokens, _one, concurrency=_concurrency(None, "batch.nsfw_concurrency"))
+    await run_batch(
+        manageable_tokens,
+        _one,
+        concurrency=_concurrency(None, "batch.nsfw_concurrency", fallback=5),
+        batch_size=_config_int("batch.nsfw_batch_size", 25, minimum=1, maximum=200),
+        pause_sec=_config_float("batch.nsfw_pause_sec", 1.0, minimum=0.0, maximum=30.0),
+    )
     logger.info(
         "admin import auto nsfw completed: token_count={} skipped_non_manageable={} ok={} failed={}",
         len(manageable_tokens),

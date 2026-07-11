@@ -339,7 +339,9 @@ async def batch_nsfw(
     async def _nsfw_and_tag(token: str) -> dict:
         return await _nsfw_one(repo, token, enabled)
 
-    c = _concurrency(concurrency, "batch.nsfw_concurrency")
+    # Keep the safe fallback even before a configuration snapshot is available
+    # (for example, direct endpoint tests or an early startup request).
+    c = _concurrency(concurrency, "batch.nsfw_concurrency", fallback=5)
     batch_size = _config_int("batch.nsfw_batch_size", 25, minimum=1, maximum=200)
     pause_sec = _config_float("batch.nsfw_pause_sec", 1.0, minimum=0.0, maximum=30.0)
     if all_manageable or all_nsfw_disabled:
