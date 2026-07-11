@@ -2,12 +2,14 @@
 [app]
 # 管理后台密码
 app_key = "grok2api"
-# 应用访问地址
-app_url = ""
+# 应用访问地址（供本地图片/视频代理生成可访问链接）
+# 本机浏览器访问： http://127.0.0.1:8000
+# 局域网其他设备访问：将 192.168.1.2 替换为运行 Docker 主机的实际 LAN IP，例如 http://192.168.1.2:8000
+app_url = "http://localhost:8000"
 # API 调用密钥
 api_key = ""
 # 启用 WebUI
-webui_enabled = false
+webui_enabled = true
 # WebUI 访问密码
 webui_key = ""
 
@@ -50,9 +52,9 @@ custom_instruction = ""
 #   grok_md   — Markdown 内嵌 Grok CDN URL
 #   local_md  — Markdown 内嵌本地代理 URL
 #   base64    — Markdown 内嵌 Base64 Data URI
-image_format = "grok_url"
+image_format = "local_md"
 # Imagine WebSocket 返回的 imagine-public 图片默认直返；开启后下载到本地并返回本地代理 URL
-imagine_public_image_proxy = false
+imagine_public_image_proxy = true
 
 # 视频返回格式
 #   grok_url  — 直接返回 Grok CDN URL
